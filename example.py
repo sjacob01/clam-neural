@@ -1,53 +1,43 @@
+import pathlib
+
 import keract
 import numpy
-from keras import layers
 from tensorflow import keras
+from tensorflow.python.keras import layers
+from tensorflow.python.keras import Model
 
 
-def get_mnist_data(is_model_conv: bool):
+def get_mnist_data():
     # Model / data parameters
-    num_classes = 10
-    input_shape = (28, 28, 1) if is_model_conv else (28, 28)
+    input_shape = (28, 28)
 
     # the data, split between train and test sets
-    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-
+    (mnist_train, mnist_labels), _ = keras.datasets.mnist.load_data()
     # Scale images to the [0, 1] range
-    x_train = x_train.astype("float32") / 255
-    x_test = x_test.astype("float32") / 255
+    mnist_train = mnist_train.astype('float32') / 255
 
-    if is_model_conv:
-        # Make sure images have shape (28, 28, 1)
-        x_train = numpy.expand_dims(x_train, -1)
-        x_test = numpy.expand_dims(x_test, -1)
-    print("x_train shape:", x_train.shape)
-    print(x_train.shape[0], "train samples")
-    print(x_test.shape[0], "test samples")
+    (fashion_train, fashion_labels), _ = keras.datasets.fashion_mnist.load_data()
+    # Scale images to the [0, 1] range
+    fashion_train = fashion_train.astype('float32') / 255
 
-    if is_model_conv:
-        # convert class vectors to binary class matrices
-        y_train = keras.utils.to_categorical(y_train, num_classes)
-        y_test = keras.utils.to_categorical(y_test, num_classes)
-
-    return num_classes, input_shape, x_train, x_test, y_train, y_test
+    return input_shape, mnist_train, mnist_labels, fashion_train, fashion_labels
 
 
-def dense_model(num_classes: int, input_shape: tuple[int, ...]):
+def dense_model(
+        num_classes: int,
+        input_shape: tuple[int, int],
+        neurons: list[int],
+) -> Model:
+
+    dense_layers: list[layers.Layer] = list()
+    [dense_layers.extend(
+        [layers.Dense(n, activation='relu', name=f'dense_{n}'), layers.Dropout(rate=0.25)]
+    ) for n in neurons]
     model = keras.models.Sequential([
-        keras.layers.Flatten(input_shape=input_shape),
-        keras.layers.Dense(128, activation='relu'),
-        keras.layers.Dropout(rate=0.25),
-        keras.layers.Dense(64, activation='relu'),
-        keras.layers.Dropout(rate=0.25),
-        keras.layers.Dense(32, activation='relu'),
-        keras.layers.Dropout(rate=0.25),
-        keras.layers.Dense(num_classes)
+        layers.Flatten(input_shape=input_shape),
+        *dense_layers,
+        layers.Dense(num_classes),
     ])
-    model.compile(
-        optimizer=keras.optimizers.Adam(0.001),
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=[keras.metrics.SparseCategoricalAccuracy()],
-    )
     return model
 
 
@@ -68,29 +58,87 @@ def conv_model(num_classes: int, input_shape: tuple[int, ...]):
     return model
 
 
-def train_model(model, x_train, y_train, batch_size, epochs):
-    model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs, validation_split=0.1)
-    return model
+def save_activations(name: str, activations: list[numpy.ndarray], labels: numpy.ndarray):
+
+    data_root = pathlib.Path(__file__).parent.joinpath('data_cross')
+    numpy.save(
+        str(data_root.joinpath(f'{name}_labels.npy')),
+        numpy.asarray(labels, dtype=numpy.uint8),
+    )
+
+    for i, output in enumerate(activations[1:], start=1):
+        numpy.save(
+            str(data_root.joinpath(f'{name}_activations_{i}.npy')),
+            numpy.asarray(output, dtype=numpy.float32),
+        )
+
+    return
+
+
+def train_model(
+        train_name: str,
+        test_name: str,
+        input_shape,
+        x_train,
+        y_train,
+        x_test,
+        y_test,
+):
+    model = dense_model(10, input_shape, [588, 392, 196, 64, 32])
+    model.build(input_shape=(None, *input_shape))
+    model.compile(
+        optimizer=keras.optimizers.Adam(0.001),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[keras.metrics.SparseCategoricalAccuracy()],
+    )
+    model.summary(line_length=120)
+
+    model_path = pathlib.Path(__file__).parent.joinpath('saved_models').joinpath(train_name)
+    if model_path.exists():
+        model.load_weights(str(model_path))
+    else:
+        callbacks = [
+            keras.callbacks.EarlyStopping(monitor='val_loss', min_delta=1e-4, patience=8, mode='min')
+        ]
+        model.fit(
+            x_train,
+            y_train,
+            batch_size=128,
+            epochs=1024,
+            validation_split=0.2,
+            callbacks=callbacks,
+        )
+
+        model.save(str(model_path))
+
+    activations = [
+        output
+        for i, (_, output) in enumerate(keract.get_activations(model, x_train).items())
+        if i % 2 == 0
+    ]
+    save_activations(train_name, activations, y_train)
+
+    activations = [
+        output
+        for i, (_, output) in enumerate(keract.get_activations(model, x_test).items())
+        if i % 2 == 0
+    ]
+    save_activations(test_name, activations, y_test)
 
 
 def main():
     # num_classes, input_shape, x_train, x_test, y_train, y_test = get_mnist_data(is_model_conv=True)
     # model = conv_model(num_classes, input_shape)
 
-    num_classes, input_shape, x_train, x_test, y_train, y_test = get_mnist_data(is_model_conv=False)
-    model = dense_model(num_classes, input_shape)
+    input_shape, mnist_train, mnist_labels, fashion_train, fashion_labels = get_mnist_data()
 
-    model.summary(line_length=120)
-
-    train_model(model, x_train, y_train, batch_size=128, epochs=10)
-
-    image = x_test[0][None, ...]  # Need to add the batch axis
-    activations = keract.get_activations(model, image)
-
-    for name, output in activations.items():
-        print()
-        print(f'Layer: {name}, shape: {output.shape}')
-        print(output)
+    train_model(
+        'fashion',
+        'mnist',
+        input_shape,
+        fashion_train, fashion_labels,
+        mnist_train, mnist_labels,
+    )
 
     return
 

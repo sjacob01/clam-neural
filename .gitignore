@@ -1,2 +1,9 @@
 .venv
 .idea
+data
+data_cross
+saved_models
+fashion_plots
+mnist_plots
+plots.zip
+
